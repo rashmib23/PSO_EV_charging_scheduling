@@ -277,9 +277,9 @@ pair<vector<dbl>, dbl> pso_run_parallel(int swarm_size, int max_iter, const Prob
     return {gbest_pos, gbest_val};
 }
 
-// ------------------------------------------------------------
+
 //  CSV OUTPUT FUNCTION
-// ------------------------------------------------------------
+
 void save_results_csv(const vector<int>& swarm_sizes,
                       const vector<double>& serial_times,
                       const vector<double>& parallel_times)
@@ -299,72 +299,9 @@ void save_results_csv(const vector<int>& swarm_sizes,
     cout << "\n[+] Results saved to results.csv\n";
 }
 
-// // --- Benchmark harness ---
-// int main(int argc, char** argv) {
-//     ios::sync_with_stdio(false);
-//     cin.tie(nullptr);
 
-//     int swarm_sizes[] = {100, 1000, 5000};
-//     int n_runs = 3;
-//     int max_iter = 100;
-//     Problem P(10); // 10 EVs (changeable)
-
-//     vector<double> serial_times;
-//     vector<double> parallel_times;
-
-//     cout << "PSO EV Toy - Serial vs Parallel (OpenMP)\n";
-//     cout << "M=" << P.M << " EVs, slots=" << P.SLOTS << ", GRID_MAX=" << P.GRID_MAX << "\n";
-
-//     // Optional: print number of threads
-//     #ifdef _OPENMP
-//     cout << "OpenMP max threads: " << omp_get_max_threads() << "\n";
-//     #else
-//     cout << "OpenMP not enabled; running serial only.\n";
-//     #endif
-
-//     for (int s = 0; s < 3; ++s) {
-//         int swarm = swarm_sizes[s];
-//         cout << "=== Swarm size: " << swarm << " ===\n";
-
-//         // Serial
-//         double t_serial = 0.0;
-//         dbl serial_best = 0.0;
-//         for (int run = 0; run < n_runs; ++run) {
-//             auto t0 = Clock::now();
-//             auto res = pso_run_serial(swarm, max_iter, P);
-//             auto t1 = Clock::now();
-//             double elapsed = chrono::duration<double>(t1 - t0).count();
-//             t_serial += elapsed;
-//             if (run == 0) serial_best = res.second;
-//         }
-//         t_serial /= n_runs;
-//         cout << "Serial best fitness: " << serial_best << "\n";
-//         cout << "Serial avg time: " << t_serial << " s\n";
-
-//         // Parallel
-//         double t_parallel = 0.0;
-//         dbl parallel_best = 0.0;
-//         for (int run = 0; run < n_runs; ++run) {
-//             auto t0 = Clock::now();
-//             auto res = pso_run_parallel(swarm, max_iter, P);
-//             auto t1 = Clock::now();
-//             double elapsed = chrono::duration<double>(t1 - t0).count();
-//             t_parallel += elapsed;
-//             if (run == 0) parallel_best = res.second;
-//         }
-//         t_parallel /= n_runs;
-//         cout << "Parallel best fitness: " << parallel_best << "\n";
-//         cout << "Parallel avg time: " << t_parallel << " s\n";
-
-//         cout << "Speedup (serial/parallel): " << (t_serial / t_parallel) << "\n\n";
-//     }
-
-//     return 0;
-// }
-
-// ------------------------------------------------------------
 //  MAIN PROGRAM
-// ------------------------------------------------------------
+
 int main(int argc, char** argv) {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
@@ -388,16 +325,16 @@ int main(int argc, char** argv) {
     cout << "OpenMP NOT enabled. Running only serial.\n\n";
     #endif
 
-    // ------------------------------------------------------------
+    
     //  LOOP OVER SWARM SIZES
-    // ------------------------------------------------------------
+    
     for (int s = 0; s < 3; ++s) {
         int swarm = swarm_sizes[s];
         cout << "=== Swarm size: " << swarm << " ===\n";
 
-        // ------------------
+      
         // Serial runs
-        // ------------------
+        
         double t_serial = 0.0;
         dbl serial_best = 0.0;
 
@@ -418,9 +355,9 @@ int main(int argc, char** argv) {
         cout << "Serial best fitness: " << serial_best << "\n";
         cout << "Serial avg time:     " << t_serial << " s\n";
 
-        // ------------------
+        
         // Parallel runs
-        // ------------------
+       
         double t_parallel = 0.0;
         dbl parallel_best = 0.0;
 
@@ -446,9 +383,9 @@ int main(int argc, char** argv) {
              << (t_serial / t_parallel) << "\n\n";
     }
 
-    // ------------------------------------------------------------
+    
     //  SAVE RESULTS TO CSV
-    // ------------------------------------------------------------
+   
     vector<int> swarm_vec = {100, 1000, 5000};
     save_results_csv(swarm_vec, serial_times, parallel_times);
 
