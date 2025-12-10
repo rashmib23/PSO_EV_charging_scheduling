@@ -1,6 +1,9 @@
 // pso_ev_clean.cpp
-// Cleaned PSO EV toy (serial vs OpenMP parallel)
-// Compile: g++ -O2 -fopenmp pso_ev_clean.cpp -o pso_ev_clean
+// PSO-based EV charging optimization
+// Serial vs OpenMP-parallel with multiple swarm sizes & thread counts
+//
+// Compile (MinGW-w64 + OpenMP):
+//   g++ -O2 -fopenmp pso_ev_clean.cpp -o pso_ev_clean
 
 #include <iostream>
 #include <vector>
@@ -11,6 +14,7 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -19,56 +23,59 @@ using namespace std;
 using Clock = chrono::high_resolution_clock;
 using dbl = double;
 
-// --- Problem definition ---
+// ----------------- Problem Definition -----------------
 struct Problem {
-    int M = 10;                  // number of EVs
-    int SLOTS = 24;              // time slots
-    dbl GRID_MAX = 50.0;         // grid max kW
-    vector<dbl> price;           // price per slot
-    vector<dbl> E_req;           // required energy per EV (kWh)
-    vector<dbl> max_power;       // max charging rate per EV per slot (kW)
-    dbl alpha = 10000.0;         // overload penalty weight
-    dbl beta  = 10000.0;         // unmet energy penalty weight
+    int M;                  // number of EVs
+    int SLOTS;              // time slots
+    dbl GRID_MAX;           // grid max kW
+    vector<dbl> price;      // price per slot
+    vector<dbl> E_req;      // required energy per EV (kWh)
+    vector<dbl> max_power;  // max charging rate per EV per slot (kW)
+    dbl alpha;              // overload penalty weight
+    dbl beta;               // unmet energy penalty weight
 
-    Problem(int M_ = 10) : M(M_) {
-        SLOTS = 24;
+    Problem(int M_ = 10)
+        : M(M_),
+          SLOTS(24),
+          GRID_MAX(50.0),
+          alpha(10000.0),
+          beta(10000.0)
+    {
         price.assign(SLOTS, 0.1);
-        // sample price curve: cheap at night (0..6), expensive at 17..20
+        // sample price curve: cheap at night, more expensive during the day
         for (int t = 0; t < SLOTS; ++t) {
-            if (t >= 17 && t <= 20) price[t] = 0.5;
-            else if (t >= 7 && t <= 16) price[t] = 0.2;
-            else price[t] = 0.08;
+            if (t >= 17 && t <= 20) price[t] = 0.5;       // peak
+            else if (t >= 7 && t <= 16) price[t] = 0.2;   // normal
+            else price[t] = 0.08;                         // off-peak
         }
-        E_req.assign(M, 8.0);       // each needs 8 kWh (example)
-        max_power.assign(M, 7.0);   // upto 7 kW per hour
+        E_req.assign(M, 8.0);       // each EV needs 8 kWh
+        max_power.assign(M, 7.0);   // up to 7 kW per hour
     }
 };
 
-// --- Random helpers (thread_local RNG) ---
-// Safe per-thread RNG for GCC/MinGW + OpenMP
+// ----------------- Random Helpers -----------------
+// Thread-safe RNG for serial & OpenMP
 static double rand01() {
-    #ifdef _OPENMP
+#ifdef _OPENMP
     static thread_local std::mt19937 rng(1234 + omp_get_thread_num());
-    #else
+#else
     static thread_local std::mt19937 rng(1234);
-    #endif
-
+#endif
     static thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
     return dist(rng);
 }
-
 
 static double uniform_rand(double a, double b) {
     return a + (b - a) * rand01();
 }
 
-
-// --- Particle structure ---
+// ----------------- Particle Structure -----------------
 struct Particle {
     vector<dbl> pos;
     vector<dbl> vel;
     vector<dbl> pbest_pos;
     dbl pbest_val;
+
     Particle(int dim = 0) {
         pos.assign(dim, 0.0);
         vel.assign(dim, 0.0);
@@ -77,12 +84,13 @@ struct Particle {
     }
 };
 
-// --- Fitness evaluation ---
+// ----------------- Fitness Evaluation -----------------
 dbl evaluate_fitness(const vector<dbl>& pos, const Problem& P) {
     int M = P.M, S = P.SLOTS;
     vector<dbl> total_power(S, 0.0);
     vector<dbl> delivered(M, 0.0);
 
+    // Aggregate EV power and delivered energy
     for (int j = 0; j < M; ++j) {
         for (int t = 0; t < S; ++t) {
             dbl p = pos[j * S + t];
@@ -91,9 +99,13 @@ dbl evaluate_fitness(const vector<dbl>& pos, const Problem& P) {
         }
     }
 
+    // Energy cost
     dbl total_cost = 0.0;
-    for (int t = 0; t < S; ++t) total_cost += P.price[t] * total_power[t];
+    for (int t = 0; t < S; ++t) {
+        total_cost += P.price[t] * total_power[t];
+    }
 
+    // Grid overload penalty
     dbl overload = 0.0;
     for (int t = 0; t < S; ++t) {
         if (total_power[t] > P.GRID_MAX) {
@@ -102,6 +114,7 @@ dbl evaluate_fitness(const vector<dbl>& pos, const Problem& P) {
         }
     }
 
+    // Unmet energy penalty
     dbl unmet = 0.0;
     for (int j = 0; j < M; ++j) {
         if (delivered[j] < P.E_req[j]) {
@@ -113,13 +126,14 @@ dbl evaluate_fitness(const vector<dbl>& pos, const Problem& P) {
     return total_cost + P.alpha * overload + P.beta * unmet;
 }
 
-// --- Repair particle to satisfy per-EV energy & bounds ---
+// ----------------- Constraint Repair -----------------
 void repair_particle(vector<dbl>& pos, const Problem& P) {
     int M = P.M, S = P.SLOTS;
     for (int j = 0; j < M; ++j) {
         dbl sum = 0.0;
+
+        // Enforce bounds and sum energy
         for (int t = 0; t < S; ++t) {
-            // enforce bounds [0, max_power[j]]
             dbl &x = pos[j * S + t];
             if (x < 0.0) x = 0.0;
             if (x > P.max_power[j]) x = P.max_power[j];
@@ -127,6 +141,7 @@ void repair_particle(vector<dbl>& pos, const Problem& P) {
         }
 
         if (sum > 1e-12) {
+            // Scale to match required energy
             dbl scale = P.E_req[j] / sum;
             for (int t = 0; t < S; ++t) {
                 dbl &x = pos[j * S + t];
@@ -134,7 +149,7 @@ void repair_particle(vector<dbl>& pos, const Problem& P) {
                 if (x > P.max_power[j]) x = P.max_power[j];
             }
         } else {
-            // distribute E_req across slots using max_power caps
+            // Distribute required energy if zero or near-zero
             dbl remain = P.E_req[j];
             for (int t = 0; t < S && remain > 1e-12; ++t) {
                 dbl add = min(P.max_power[j], remain);
@@ -145,11 +160,12 @@ void repair_particle(vector<dbl>& pos, const Problem& P) {
     }
 }
 
-// --- Initialize swarm ---
+// ----------------- Swarm Initialization -----------------
 void initialize_swarm(vector<Particle>& swarm, int swarm_size, const Problem& P) {
     int dim = P.M * P.SLOTS;
     swarm.clear();
     swarm.resize(swarm_size, Particle(dim));
+
     for (int i = 0; i < swarm_size; ++i) {
         for (int k = 0; k < dim; ++k) {
             int j = k / P.SLOTS;
@@ -163,17 +179,19 @@ void initialize_swarm(vector<Particle>& swarm, int swarm_size, const Problem& P)
     }
 }
 
-// --- Serial PSO ---
+// ----------------- Serial PSO -----------------
 pair<vector<dbl>, dbl> pso_run_serial(int swarm_size, int max_iter, const Problem& P) {
     int dim = P.M * P.SLOTS;
     const double w = 0.729;
-    const double c1 = 1.49445, c2 = 1.49445;
+    const double c1 = 1.49445;
+    const double c2 = 1.49445;
 
     vector<Particle> swarm;
     initialize_swarm(swarm, swarm_size, P);
 
     dbl gbest_val = 1e300;
     vector<dbl> gbest_pos(dim, 0.0);
+
     for (int i = 0; i < swarm_size; ++i) {
         if (swarm[i].pbest_val < gbest_val) {
             gbest_val = swarm[i].pbest_val;
@@ -193,7 +211,7 @@ pair<vector<dbl>, dbl> pso_run_serial(int swarm_size, int max_iter, const Proble
                 }
             }
 
-            // update velocity & position
+            // Velocity & position update
             for (int k = 0; k < dim; ++k) {
                 double r1 = rand01();
                 double r2 = rand01();
@@ -205,20 +223,24 @@ pair<vector<dbl>, dbl> pso_run_serial(int swarm_size, int max_iter, const Proble
             repair_particle(swarm[i].pos, P);
         }
     }
-    return {gbest_pos, gbest_val};
+
+    return { gbest_pos, gbest_val };
 }
 
-// --- Parallel PSO (OpenMP) ---
+// ----------------- Parallel PSO (OpenMP) -----------------
 pair<vector<dbl>, dbl> pso_run_parallel(int swarm_size, int max_iter, const Problem& P) {
     int dim = P.M * P.SLOTS;
     const double w = 0.729;
-    const double c1 = 1.49445, c2 = 1.49445;
+    const double c1 = 1.49445;
+    const double c2 = 1.49445;
 
     vector<Particle> swarm;
     initialize_swarm(swarm, swarm_size, P);
 
     dbl gbest_val = 1e300;
     vector<dbl> gbest_pos(dim, 0.0);
+
+    // Initial global best from pBests
     for (int i = 0; i < swarm_size; ++i) {
         if (swarm[i].pbest_val < gbest_val) {
             gbest_val = swarm[i].pbest_val;
@@ -227,26 +249,28 @@ pair<vector<dbl>, dbl> pso_run_parallel(int swarm_size, int max_iter, const Prob
     }
 
     for (int it = 0; it < max_iter; ++it) {
-        // evaluate & update pbest in parallel
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < swarm_size; ++i) {
-            dbl val = evaluate_fitness(swarm[i].pos, P);
-            if (val < swarm[i].pbest_val) {
-                swarm[i].pbest_val = val;
-                swarm[i].pbest_pos = swarm[i].pos;
-            }
-        }
 
-        // reduction step to find global best (single thread)
-        #pragma omp single
-        {
-            // single must be inside a parallel region; wrap below in parallel region
-        }
-
-        // We need a full parallel region to use single properly. Do that:
+        // Full parallel region per iteration
+#ifdef _OPENMP
         #pragma omp parallel
+#endif
         {
+            // 1) Evaluate fitness & update pBest in parallel
+#ifdef _OPENMP
+            #pragma omp for schedule(static)
+#endif
+            for (int i = 0; i < swarm_size; ++i) {
+                dbl val = evaluate_fitness(swarm[i].pos, P);
+                if (val < swarm[i].pbest_val) {
+                    swarm[i].pbest_val = val;
+                    swarm[i].pbest_pos = swarm[i].pos;
+                }
+            }
+
+            // 2) Global best update (single thread)
+#ifdef _OPENMP
             #pragma omp single
+#endif
             {
                 for (int i = 0; i < swarm_size; ++i) {
                     if (swarm[i].pbest_val < gbest_val) {
@@ -256,10 +280,10 @@ pair<vector<dbl>, dbl> pso_run_parallel(int swarm_size, int max_iter, const Prob
                 }
             }
 
-            #pragma omp barrier
-
-            // update velocity & position in parallel
+            // 3) Velocity & position update in parallel
+#ifdef _OPENMP
             #pragma omp for schedule(static)
+#endif
             for (int i = 0; i < swarm_size; ++i) {
                 for (int k = 0; k < dim; ++k) {
                     double r1 = rand01();
@@ -270,124 +294,100 @@ pair<vector<dbl>, dbl> pso_run_parallel(int swarm_size, int max_iter, const Prob
                     swarm[i].pos[k] += swarm[i].vel[k];
                 }
                 repair_particle(swarm[i].pos, P);
-            } // omp for
-        } // omp parallel
-    } // iterations
-
-    return {gbest_pos, gbest_val};
-}
-
-
-//  CSV OUTPUT FUNCTION
-
-void save_results_csv(const vector<int>& swarm_sizes,
-                      const vector<double>& serial_times,
-                      const vector<double>& parallel_times)
-{
-    ofstream file("results.csv");
-    file << "SwarmSize,SerialTime,ParallelTime,Speedup\n";
-
-    for (int i = 0; i < swarm_sizes.size(); i++) {
-        double speedup = serial_times[i] / parallel_times[i];
-        file << swarm_sizes[i] << ","
-             << serial_times[i] << ","
-             << parallel_times[i] << ","
-             << speedup << "\n";
+            }
+        } // end parallel region
     }
 
-    file.close();
-    cout << "\n[+] Results saved to results.csv\n";
+    return { gbest_pos, gbest_val };
 }
 
-
-//  MAIN PROGRAM
-
+// ----------------- MAIN: Sweep Swarms & Threads, CSV Output -----------------
 int main(int argc, char** argv) {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
-    int swarm_sizes[3] = {100, 1000, 5000};
-    int n_runs = 3;          // average over 3 runs
-    int max_iter = 100;      // PSO iterations
-    Problem P(10);           // 10 EVs (adjustable)
+    // Swarm sizes to test
+    vector<int> swarm_sizes = {100, 200, 300};
+    // Thread counts for parallel PSO
+    vector<int> thread_counts = {1, 2, 4, 8};
 
-    vector<double> serial_times;
-    vector<double> parallel_times;
+    int n_runs = 3;      // average over 3 runs
+    int max_iter = 100;  // PSO iterations
+    Problem P(10);       // 10 EVs
 
-    cout << "PSO EV Toy - Serial vs Parallel (OpenMP)\n";
-    cout << "M=" << P.M << " EVs, slots=" << P.SLOTS 
+    cout << "PSO EV - Serial vs Parallel (OpenMP)\n";
+    cout << "M=" << P.M << " EVs, slots=" << P.SLOTS
          << ", GRID_MAX=" << P.GRID_MAX << "\n";
 
-    // Thread info
-    #ifdef _OPENMP
-    cout << "OpenMP max threads: " << omp_get_max_threads() << "\n\n";
-    #else
-    cout << "OpenMP NOT enabled. Running only serial.\n\n";
-    #endif
+#ifdef _OPENMP
+    cout << "OpenMP detected. Max available threads: "
+         << omp_get_max_threads() << "\n\n";
+#else
+    cout << "OpenMP NOT enabled. Only serial behavior is effective.\n\n";
+#endif
 
-    
-    //  LOOP OVER SWARM SIZES
-    
-    for (int s = 0; s < 3; ++s) {
-        int swarm = swarm_sizes[s];
-        cout << "=== Swarm size: " << swarm << " ===\n";
+    ofstream file("results_threads.csv");
+    file << "SwarmSize,Threads,SerialTime,ParallelTime,Speedup\n";
 
-      
-        // Serial runs
-        
-        double t_serial = 0.0;
+    for (int swarm : swarm_sizes) {
+        cout << "==============================\n";
+        cout << "Swarm size: " << swarm << "\n";
+
+        // ----- Serial baseline -----
+        double t_serial_sum = 0.0;
         dbl serial_best = 0.0;
 
-        for (int r = 0; r < n_runs; r++) {
+        for (int r = 0; r < n_runs; ++r) {
             auto t0 = Clock::now();
             auto res = pso_run_serial(swarm, max_iter, P);
             auto t1 = Clock::now();
 
             double elapsed = chrono::duration<double>(t1 - t0).count();
-            t_serial += elapsed;
-
-            if (r == 0)
-                serial_best = res.second;
+            t_serial_sum += elapsed;
+            if (r == 0) serial_best = res.second;
         }
-        t_serial /= n_runs;   // average
-        serial_times.push_back(t_serial);
 
-        cout << "Serial best fitness: " << serial_best << "\n";
-        cout << "Serial avg time:     " << t_serial << " s\n";
+        double t_serial = t_serial_sum / n_runs;
+        cout << "  Serial best fitness: " << serial_best << "\n";
+        cout << "  Serial avg time:     " << t_serial << " s\n\n";
 
-        
-        // Parallel runs
-       
-        double t_parallel = 0.0;
-        dbl parallel_best = 0.0;
+        // ----- Parallel runs for each thread count -----
+        for (int th : thread_counts) {
 
-        for (int r = 0; r < n_runs; r++) {
-            auto t0 = Clock::now();
-            auto res = pso_run_parallel(swarm, max_iter, P);
-            auto t1 = Clock::now();
+#ifdef _OPENMP
+            omp_set_num_threads(th);
+#endif
 
-            double elapsed = chrono::duration<double>(t1 - t0).count();
-            t_parallel += elapsed;
+            double t_parallel_sum = 0.0;
+            dbl parallel_best = 0.0;
 
-            if (r == 0)
-                parallel_best = res.second;
+            for (int r = 0; r < n_runs; ++r) {
+                auto t0 = Clock::now();
+                auto res = pso_run_parallel(swarm, max_iter, P);
+                auto t1 = Clock::now();
+
+                double elapsed = chrono::duration<double>(t1 - t0).count();
+                t_parallel_sum += elapsed;
+                if (r == 0) parallel_best = res.second;
+            }
+
+            double t_parallel = t_parallel_sum / n_runs;
+            double speedup = t_serial / t_parallel;
+
+            cout << "    Threads: " << th << "\n";
+            cout << "      Parallel best fitness: " << parallel_best << "\n";
+            cout << "      Parallel avg time:     " << t_parallel << " s\n";
+            cout << "      Speedup:               " << speedup << "x\n\n";
+
+            file << swarm << ","
+                 << th << ","
+                 << t_serial << ","
+                 << t_parallel << ","
+                 << speedup << "\n";
         }
-        t_parallel /= n_runs;
-        parallel_times.push_back(t_parallel);
-
-        cout << "Parallel best fitness: " << parallel_best << "\n";
-        cout << "Parallel avg time:     " << t_parallel << " s\n";
-
-        // Speedup
-        cout << "Speedup (serial/parallel): " 
-             << (t_serial / t_parallel) << "\n\n";
     }
 
-    
-    //  SAVE RESULTS TO CSV
-   
-    vector<int> swarm_vec = {100, 1000, 5000};
-    save_results_csv(swarm_vec, serial_times, parallel_times);
-
+    file.close();
+    cout << "\n[+] Detailed results saved to results_threads.csv\n";
     return 0;
 }
